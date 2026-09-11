@@ -3,24 +3,29 @@ import mongoose, { Schema, Document } from "mongoose";
 export interface IUser extends Document {
   name: string;
   email: string;
-  password: string;
+  password?: string;
   role: 'admin' | 'employee' | 'executive';
   companyId: mongoose.Types.ObjectId;
   departmentId?: mongoose.Types.ObjectId;
+  googleId?: string;
+  avatar?: string;
   createdAt: Date;
 }
 
 const UserSchema: Schema = new Schema({
   name: { type: String, required: true },
   email: { type: String, required: true, unique: true, lowercase: true, trim: true },
-  // select: false means password is excluded from queries by default (e.g. Company/User lookups
-  // elsewhere in the app won't accidentally leak the hash) - authController explicitly opts in
+  // select: false means password is excluded from queries by default - authController explicitly opts in
   // with .select("+password") when it actually needs to compare it during login.
-  password: { type: String, required: true, select: false },
+  // Optional for users authenticated through Google OAuth.
+  password: { type: String, select: false },
   role: { type: String, enum: ['admin', 'employee', 'executive'], required: true },
   companyId: { type: Schema.Types.ObjectId, ref: 'Company', required: true },
   departmentId: { type: Schema.Types.ObjectId, ref: 'Department' },
+  googleId: { type: String, sparse: true },
+  avatar: { type: String },
   createdAt: { type: Date, default: Date.now },
 });
 
 export default mongoose.model<IUser>("User", UserSchema);
+

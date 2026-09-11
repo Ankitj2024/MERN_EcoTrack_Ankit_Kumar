@@ -5,6 +5,9 @@ import { useAuth } from "../../context/AuthContext";
 import { COUNTRIES } from "../../constants/regions";
 import { Select } from "../../components/ui/Select";
 import { useToast } from "../../context/ToastContext";
+import { GoogleSignInButton } from "../../components/auth/GoogleSignInButton";
+import { PasswordStrengthMeter } from "../../components/auth/PasswordStrengthMeter";
+import { evaluatePassword } from "../../utils/passwordValidator";
 
 export default function RegisterPage() {
   const navigate = useNavigate();
@@ -29,10 +32,13 @@ export default function RegisterPage() {
     setFormData({ ...formData, password: value });
     if (value.trim().length === 0) {
       setPasswordError("Password is required.");
-    } else if (value.trim().length < 8) {
-      setPasswordError("Password must be at least 8 characters.");
     } else {
-      setPasswordError(null);
+      const evaluation = evaluatePassword(value);
+      if (!evaluation.isStrong) {
+        setPasswordError("Password must satisfy all strength requirements below.");
+      } else {
+        setPasswordError(null);
+      }
     }
     if (formData.confirmPassword && value !== formData.confirmPassword) {
       setConfirmPasswordError("Passwords do not match.");
@@ -63,8 +69,9 @@ export default function RegisterPage() {
       setPasswordError("Password is required.");
       return;
     }
-    if (trimmedPassword.length < 8) {
-      setPasswordError("Password must be at least 8 characters.");
+    const evalResult = evaluatePassword(trimmedPassword);
+    if (!evalResult.isStrong) {
+      setPasswordError("Password does not meet all security requirements.");
       return;
     }
     if (!trimmedConfirm) {
@@ -103,16 +110,28 @@ export default function RegisterPage() {
       <div className="absolute bottom-1/4 right-1/4 w-[400px] h-[400px] bg-blue-500/10 rounded-full blur-3xl animate-pulse" style={{ animationDelay: '1.5s' }} />
 
       <div className="max-w-xl w-full dark:bg-zinc-900/80 bg-white/80 backdrop-blur-xl border dark:border-white/[0.06] border-gray-200 rounded-2xl p-10 pb-12 shadow-sm relative z-10">
-        <div className="text-center mb-12">
-          <div className="w-12 h-12 bg-emerald-500/10 border border-emerald-500/20 rounded-2xl flex items-center justify-center mx-auto mb-8">
+        <div className="text-center mb-8">
+          <div className="w-12 h-12 bg-emerald-500/10 border border-emerald-500/20 rounded-2xl flex items-center justify-center mx-auto mb-6">
             <Leaf className="w-6 h-6 text-emerald-500" />
           </div>
           <h2 className="text-2xl font-light dark:text-zinc-100 text-gray-900 tracking-tight">Create an Account</h2>
-          <p className="dark:text-zinc-500 text-gray-500 mt-4 text-sm">Join EcoTrack and manage your corporate emissions.</p>
+          <p className="dark:text-zinc-500 text-gray-500 mt-3 text-sm">Join EcoTrack and manage your corporate emissions.</p>
+        </div>
+
+        {/* Google Sign-Up */}
+        <div className="mb-8">
+          <GoogleSignInButton text="Sign up with Google" />
+          <div className="relative flex py-4 items-center">
+            <div className="flex-grow border-t border-gray-200 dark:border-white/[0.06]" />
+            <span className="flex-shrink mx-3 text-[10px] uppercase font-bold tracking-widest text-gray-400 dark:text-zinc-500">
+              or register with email
+            </span>
+            <div className="flex-grow border-t border-gray-200 dark:border-white/[0.06]" />
+          </div>
         </div>
         
-        <form onSubmit={handleSubmit} className="space-y-8">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+        <form onSubmit={handleSubmit} className="space-y-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div className="md:col-span-2">
               <label className="block text-[10px] uppercase tracking-widest font-bold dark:text-zinc-500 text-gray-500 mb-2">Company Name</label>
               <input
@@ -158,7 +177,7 @@ export default function RegisterPage() {
                 required
               />
             </div>
-            <div>
+            <div className="md:col-span-2">
               <label className="block text-[10px] uppercase tracking-widest font-bold dark:text-zinc-500 text-gray-500 mb-2">Password</label>
               <div className="relative">
                 <input
@@ -182,11 +201,12 @@ export default function RegisterPage() {
                   {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
                 </button>
               </div>
+              <PasswordStrengthMeter password={formData.password} />
               {passwordError && (
                 <p className="mt-1.5 text-xs text-red-500 dark:text-red-400">{passwordError}</p>
               )}
             </div>
-            <div>
+            <div className="md:col-span-2">
               <label className="block text-[10px] uppercase tracking-widest font-bold dark:text-zinc-500 text-gray-500 mb-2">Confirm Password</label>
               <div className="relative">
                 <input

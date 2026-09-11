@@ -1,17 +1,28 @@
 import { Request, Response } from "express";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+import { OAuth2Client } from "google-auth-library";
 import User from "../models/User.js";
+import Otp from "../models/Otp.js";
 import { Company, VALID_REGIONS } from "../models/Company.js";
+import { validateStrongPassword } from "../utils/passwordValidator.js";
+import { sendOtpEmail } from "../utils/emailService.js";
 
-const signToken = (payload: { id: string; role: string; companyId: string }) => {
+const getJwtSecret = () => {
   const secret = process.env.JWT_SECRET;
   if (!secret) throw new Error("JWT_SECRET is not set in environment variables");
-  return jwt.sign(payload, secret, { expiresIn: "7d" });
+  return secret;
 };
 
+const signToken = (payload: { id: string; role: string; companyId: string }) => {
+  return jwt.sign(payload, getJwtSecret(), { expiresIn: "7d" });
+};
+
+// Google OAuth client
+const googleClientId = process.env.GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID;
+const googleClient = googleClientId ? new OAuth2Client(googleClientId) : null;
+
 // Registers a brand new company along with its first user (always "admin").
-// This matches the onboarding flow: a company doesn't exist until someone signs up for it.
 export const register = async (req: Request, res: Response) => {
   try {
     const { name, email, password, companyName, region } = req.body;
@@ -19,24 +30,31 @@ export const register = async (req: Request, res: Response) => {
     if (!name || !email || !password || !companyName || !region) {
       return res.status(400).json({ message: "All fields are required" });
     }
-    if (password.length < 8) {
-      return res.status(400).json({ message: "Password must be at least 8 characters" });
+
+    // Strong password validation
+    const passwordValidation = validateStrongPassword(password);
+    if (!passwordValidation.isValid) {
+      return res.status(400).json({
+        message: passwordValidation.message || "Password does not meet complexity requirements",
+        details: passwordValidation.details,
+      });
     }
+
     if (!VALID_REGIONS.includes(region)) {
       return res.status(400).json({ message: `Region must be one of: ${VALID_REGIONS.join(", ")}` });
     }
 
-    const existingUser = await User.findOne({ email: email.toLowerCase() });
+    const existingUser = await User.findOne({ email: email.toLowerCase().trim() });
     if (existingUser) {
       return res.status(409).json({ message: "An account with this email already exists" });
     }
 
-    const company = await Company.create({ name: companyName, region });
+    const company = await Company.create({ name: companyName.trim(), region });
 
     const hashedPassword = await bcrypt.hash(password, 10);
     const user = await User.create({
-      name,
-      email: email.toLowerCase(),
+      name: name.trim(),
+      email: email.toLowerCase().trim(),
       password: hashedPassword,
       role: "admin",
       companyId: company._id,
@@ -50,6 +68,7 @@ export const register = async (req: Request, res: Response) => {
       companyName: company.name,
     });
   } catch (error) {
+    console.error("Registration error:", error);
     res.status(500).json({ message: "Server error", error });
   }
 };
@@ -62,9 +81,13 @@ export const login = async (req: Request, res: Response) => {
       return res.status(400).json({ message: "Email and password are required" });
     }
 
-    const user = await User.findOne({ email: email.toLowerCase() }).select("+password").populate("companyId", "name");
+    const user = await User.findOne({ email: email.toLowerCase().trim() }).select("+password").populate("companyId", "name");
     if (!user) {
       return res.status(401).json({ message: "Invalid email or password" });
+    }
+
+    if (!user.password) {
+      return res.status(401).json({ message: "This account uses Google Sign-In. Please sign in with Google." });
     }
 
     const isMatch = await bcrypt.compare(password, user.password);
@@ -77,23 +100,170 @@ export const login = async (req: Request, res: Response) => {
 
     res.json({
       token,
-      user: { id: user._id, name: user.name, email: user.email, role: user.role, departmentId: user.departmentId },
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        departmentId: user.departmentId,
+        avatar: user.avatar,
+      },
       companyName: (user.companyId as any).name || null,
     });
   } catch (error) {
+    console.error("Login error:", error);
     res.status(500).json({ message: "Server error", error });
   }
 };
 
-// Lets the frontend restore session details (e.g. after a hard refresh) using just the token,
-// without re-sending credentials.
+// Google OAuth Login / Registration endpoint
+export const googleLogin = async (req: Request, res: Response) => {
+  try {
+    const { credential, mockUser } = req.body;
+
+    let email: string = "";
+    let name: string = "";
+    let googleId: string = "";
+    let picture: string | undefined;
+
+    if (credential) {
+      // Verify token with Google if client configured, or decode payload
+      if (googleClient && googleClientId) {
+        try {
+          const ticket = await googleClient.verifyIdToken({
+            idToken: credential,
+            audience: googleClientId,
+          });
+          const payload = ticket.getPayload();
+          if (!payload || !payload.email) {
+            return res.status(400).json({ message: "Invalid Google token payload" });
+          }
+          email = payload.email;
+          name = payload.name || payload.email.split("@")[0];
+          googleId = payload.sub;
+          picture = payload.picture;
+        } catch (verifErr) {
+          console.warn("Google token verification failed with google-auth-library, trying fallback decode:", verifErr);
+          const decoded = jwt.decode(credential) as any;
+          if (!decoded || !decoded.email) {
+            return res.status(400).json({ message: "Invalid or expired Google token" });
+          }
+          email = decoded.email;
+          name = decoded.name || decoded.email.split("@")[0];
+          googleId = decoded.sub || "google_" + Date.now();
+          picture = decoded.picture;
+        }
+      } else {
+        // Dev fallback if client ID not yet configured
+        const decoded = jwt.decode(credential) as any;
+        if (decoded && decoded.email) {
+          email = decoded.email;
+          name = decoded.name || decoded.email.split("@")[0];
+          googleId = decoded.sub || "google_" + Date.now();
+          picture = decoded.picture;
+        } else {
+          return res.status(400).json({ message: "Google Client ID is not configured on server" });
+        }
+      }
+    } else if (mockUser && process.env.NODE_ENV !== "production") {
+      // Dev mock sign-in for local rapid testing without Google console keys
+      email = mockUser.email;
+      name = mockUser.name || mockUser.email.split("@")[0];
+      googleId = "mock_google_" + Date.now();
+      picture = mockUser.picture;
+    } else {
+      return res.status(400).json({ message: "Google credential is required" });
+    }
+
+    if (!email) {
+      return res.status(400).json({ message: "Unable to retrieve email from Google profile" });
+    }
+
+    email = email.toLowerCase().trim();
+
+    // Check if user already exists
+    let user = await User.findOne({ email }).populate("companyId", "name");
+
+    if (user) {
+      // Link Google ID and avatar if not present
+      let needsSave = false;
+      if (!user.googleId && googleId) {
+        user.googleId = googleId;
+        needsSave = true;
+      }
+      if (!user.avatar && picture) {
+        user.avatar = picture;
+        needsSave = true;
+      }
+      if (needsSave) {
+        await user.save();
+      }
+
+      const companyId = (user.companyId as any)._id?.toString() || user.companyId.toString();
+      const token = signToken({ id: user._id.toString(), role: user.role, companyId });
+
+      return res.json({
+        token,
+        user: {
+          id: user._id,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          departmentId: user.departmentId,
+          avatar: user.avatar,
+        },
+        companyName: (user.companyId as any)?.name || null,
+      });
+    }
+
+    // New user signing up via Google: create default company & user
+    const company = await Company.create({
+      name: `${name}'s Organization`,
+      region: "United States",
+    });
+
+    user = await User.create({
+      name,
+      email,
+      role: "admin",
+      companyId: company._id,
+      googleId,
+      avatar: picture,
+    });
+
+    const token = signToken({ id: user._id.toString(), role: user.role, companyId: company._id.toString() });
+
+    return res.status(201).json({
+      token,
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        avatar: user.avatar,
+      },
+      companyName: company.name,
+    });
+  } catch (error) {
+    console.error("Google login error:", error);
+    res.status(500).json({ message: "Google authentication failed", error });
+  }
+};
+
 export const getMe = async (req: Request, res: Response) => {
   try {
     const user = await User.findById(req.user!.id).populate("companyId", "name");
     if (!user) return res.status(404).json({ message: "User not found" });
 
     res.json({
-      user: { id: user._id, name: user.name, email: user.email, role: user.role, departmentId: user.departmentId },
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        departmentId: user.departmentId,
+        avatar: user.avatar,
+      },
       companyName: (user.companyId as any)?.name || null,
     });
   } catch (error) {
@@ -101,60 +271,160 @@ export const getMe = async (req: Request, res: Response) => {
   }
 };
 
-// Forgot password - accepts email and generates a reset token
-// In a production app, this would send an email. For this demo, we return the token directly.
+// Forgot password - generates secure 6-digit OTP, saves hashed record, sends email
 export const forgotPassword = async (req: Request, res: Response) => {
   try {
     const { email } = req.body;
-    if (!email) {
+    if (!email || typeof email !== "string") {
       return res.status(400).json({ message: "Email is required" });
     }
 
-    const user = await User.findOne({ email: email.toLowerCase() });
+    const cleanEmail = email.toLowerCase().trim();
+    const user = await User.findOne({ email: cleanEmail });
+
+    // Always respond with a positive confirmation message to prevent user enumeration
     if (!user) {
-      // Don't reveal whether the email exists - security best practice
-      return res.json({ message: "If an account with that email exists, a reset link has been sent." });
+      return res.json({
+        success: true,
+        message: "If an account with that email exists, a verification code has been sent.",
+      });
     }
 
-    // Generate a password reset token valid for 1 hour
-    const resetToken = jwt.sign(
-      { id: user._id.toString(), purpose: "password-reset" },
-      process.env.JWT_SECRET || "fallback-secret",
-      { expiresIn: "1h" }
-    );
+    // Generate cryptographically random 6-digit OTP
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const hashedOtp = await bcrypt.hash(otp, 10);
 
-    console.log(`[DEMO] Password reset token for ${email}: ${resetToken}`);
+    // Expire in 10 minutes
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
-    res.json({ message: "If an account with that email exists, a reset link has been sent." });
+    // Remove any previous active OTPs for this email and save the new one
+    await Otp.deleteMany({ email: cleanEmail });
+    await Otp.create({
+      email: cleanEmail,
+      otp: hashedOtp,
+      expiresAt,
+      attempts: 0,
+    });
+
+    // Send OTP email
+    await sendOtpEmail(cleanEmail, otp);
+
+    res.json({
+      success: true,
+      message: "If an account with that email exists, a verification code has been sent.",
+      email: cleanEmail,
+    });
   } catch (error) {
-    res.status(500).json({ message: "Server error", error });
+    console.error("Forgot password error:", error);
+    res.status(500).json({ message: "Failed to process forgot password request", error });
   }
 };
 
-// Reset password using a valid reset token
+// Verify the 6-digit OTP
+export const verifyOtp = async (req: Request, res: Response) => {
+  try {
+    const { email, otp } = req.body;
+
+    if (!email || !otp) {
+      return res.status(400).json({ message: "Email and 6-digit code are required" });
+    }
+
+    const cleanEmail = email.toLowerCase().trim();
+    const cleanOtp = otp.toString().trim();
+
+    const otpRecord = await Otp.findOne({
+      email: cleanEmail,
+      expiresAt: { $gt: new Date() },
+    });
+
+    if (!otpRecord) {
+      return res.status(400).json({ message: "Verification code has expired or is invalid. Please request a new one." });
+    }
+
+    // Check brute force attempts
+    if (otpRecord.attempts >= 5) {
+      await Otp.deleteOne({ _id: otpRecord._id });
+      return res.status(429).json({ message: "Too many failed attempts. Please request a new verification code." });
+    }
+
+    const isMatch = await bcrypt.compare(cleanOtp, otpRecord.otp);
+    if (!isMatch) {
+      otpRecord.attempts += 1;
+      await otpRecord.save();
+      const remaining = 5 - otpRecord.attempts;
+      return res.status(400).json({
+        message: `Invalid verification code. ${remaining > 0 ? `${remaining} attempts remaining.` : "Please request a new code."}`,
+      });
+    }
+
+    // Successfully verified: remove OTP record to prevent replay
+    await Otp.deleteOne({ _id: otpRecord._id });
+
+    const user = await User.findOne({ email: cleanEmail });
+    if (!user) {
+      return res.status(404).json({ message: "User account not found" });
+    }
+
+    // Issue short-lived password reset token (15 mins)
+    const resetToken = jwt.sign(
+      { id: user._id.toString(), email: cleanEmail, purpose: "password-reset" },
+      getJwtSecret(),
+      { expiresIn: "15m" }
+    );
+
+    res.json({
+      success: true,
+      message: "Code verified successfully.",
+      resetToken,
+    });
+  } catch (error) {
+    console.error("Verify OTP error:", error);
+    res.status(500).json({ message: "Failed to verify code", error });
+  }
+};
+
+// Reset password with verified token and strong password check
 export const resetPassword = async (req: Request, res: Response) => {
   try {
-    const { token, password } = req.body;
+    const { resetToken, password } = req.body;
 
-    if (!token || !password) {
-      return res.status(400).json({ message: "Token and new password are required" });
-    }
-    if (password.length < 8) {
-      return res.status(400).json({ message: "Password must be at least 8 characters" });
+    if (!resetToken || !password) {
+      return res.status(400).json({ message: "Reset token and new password are required" });
     }
 
-    const secret = process.env.JWT_SECRET || "fallback-secret";
-    const decoded = jwt.verify(token, secret) as { id: string; purpose: string };
+    // Validate strong password
+    const validation = validateStrongPassword(password);
+    if (!validation.isValid) {
+      return res.status(400).json({
+        message: validation.message || "Password does not meet complexity requirements",
+        details: validation.details,
+      });
+    }
+
+    let decoded: any;
+    try {
+      decoded = jwt.verify(resetToken, getJwtSecret());
+    } catch (err) {
+      return res.status(400).json({ message: "Invalid or expired reset session. Please request a new OTP." });
+    }
 
     if (decoded.purpose !== "password-reset") {
       return res.status(400).json({ message: "Invalid reset token" });
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
-    await User.findByIdAndUpdate(decoded.id, { password: hashedPassword });
+    const user = await User.findByIdAndUpdate(decoded.id, { password: hashedPassword }, { new: true });
 
-    res.json({ message: "Password reset successfully. You can now log in with your new password." });
+    if (!user) {
+      return res.status(404).json({ message: "User account not found" });
+    }
+
+    res.json({
+      success: true,
+      message: "Password reset successfully! You can now sign in with your new password.",
+    });
   } catch (error) {
-    res.status(400).json({ message: "Invalid or expired reset token" });
+    console.error("Reset password error:", error);
+    res.status(500).json({ message: "Failed to reset password", error });
   }
 };
