@@ -47,6 +47,41 @@ function getTransporter() {
   return transporter;
 }
 
+async function sendViaResend(toEmail: string, otp: string, htmlContent: string): Promise<boolean> {
+  const resendApiKey = (process.env.RESEND_API_KEY || "").trim();
+  if (!resendApiKey) return false;
+
+  try {
+    const fromAddress = (process.env.RESEND_FROM || "EcoTrack Security <onboarding@resend.dev>").trim();
+    const response = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${resendApiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from: fromAddress,
+        to: [toEmail],
+        subject: `Your EcoTrack Verification Code: ${otp}`,
+        html: htmlContent,
+      }),
+    });
+
+    if (response.ok) {
+      const data = await response.json() as any;
+      console.log(`✅ Reset OTP email dispatched via Resend HTTPS to ${toEmail} (Id: ${data.id})`);
+      return true;
+    } else {
+      const errorText = await response.text();
+      console.warn("⚠️ Resend API responded with error:", errorText);
+      return false;
+    }
+  } catch (err) {
+    console.warn("⚠️ Resend API call failed:", err);
+    return false;
+  }
+}
+
 export async function sendOtpEmail(toEmail: string, otp: string): Promise<SendOtpResult> {
   const mailTransporter = getTransporter();
   const cleanFrom = (process.env.SMTP_FROM || "").trim();
@@ -103,6 +138,15 @@ export async function sendOtpEmail(toEmail: string, otp: string): Promise<SendOt
   console.log("   Validity:  10 minutes");
   console.log("=======================================================\n");
 
+  // 1. Try Resend HTTPS dispatch first (works 100% on Render Free Tier via Port 443)
+  if (process.env.RESEND_API_KEY) {
+    const resendSuccess = await sendViaResend(toEmail, otp, htmlContent);
+    if (resendSuccess) {
+      return { success: true };
+    }
+  }
+
+  // 2. Fallback to standard SMTP if configured
   if (mailTransporter) {
     try {
       const sendPromise = mailTransporter.sendMail({
