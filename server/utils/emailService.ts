@@ -11,18 +11,37 @@ let transporter: any = null;
 function getTransporter() {
   if (transporter) return transporter;
 
-  const host = process.env.SMTP_HOST;
-  const user = process.env.SMTP_USER;
-  const pass = process.env.SMTP_PASS;
+  const host = (process.env.SMTP_HOST || "").trim();
+  const user = (process.env.SMTP_USER || "").trim();
+  const rawPass = (process.env.SMTP_PASS || "").trim();
+  // Strip spaces from Google App Passwords ("abcd efgh ijkl mnop" -> "abcdefghijklmnop")
+  const pass = rawPass.replace(/\s+/g, "");
 
   if (host && user && pass) {
-    transporter = nodemailer.createTransport({
-      host,
-      port: Number(process.env.SMTP_PORT) || 587,
-      secure: process.env.SMTP_SECURE === "true",
-      auth: { user, pass },
-    });
-    console.log("📧 Email service configured with SMTP host:", host);
+    if (host.includes("gmail") || user.includes("@gmail.com")) {
+      transporter = nodemailer.createTransport({
+        service: "gmail",
+        auth: { user, pass },
+        connectionTimeout: 8000,
+        greetingTimeout: 5000,
+        socketTimeout: 10000,
+      });
+      console.log("📧 Email service configured with Gmail Service for:", user);
+    } else {
+      transporter = nodemailer.createTransport({
+        host,
+        port: Number(process.env.SMTP_PORT) || 587,
+        secure: process.env.SMTP_SECURE === "true",
+        auth: { user, pass },
+        connectionTimeout: 8000,
+        greetingTimeout: 5000,
+        socketTimeout: 10000,
+        tls: {
+          rejectUnauthorized: false,
+        },
+      });
+      console.log("📧 Email service configured with SMTP host:", host);
+    }
   }
 
   return transporter;
@@ -30,7 +49,8 @@ function getTransporter() {
 
 export async function sendOtpEmail(toEmail: string, otp: string): Promise<SendOtpResult> {
   const mailTransporter = getTransporter();
-  const fromAddress = process.env.SMTP_FROM || '"EcoTrack Security" <no-reply@ecotrack.local>';
+  const cleanFrom = (process.env.SMTP_FROM || "").trim();
+  const fromAddress = cleanFrom || `"EcoTrack Security" <${(process.env.SMTP_USER || "no-reply@ecotrack.local").trim()}>`;
 
   const htmlContent = `
     <!DOCTYPE html>
@@ -85,7 +105,7 @@ export async function sendOtpEmail(toEmail: string, otp: string): Promise<SendOt
 
   if (mailTransporter) {
     try {
-      const info = await mailTransporter.sendMail({
+      const sendPromise = mailTransporter.sendMail({
         from: fromAddress,
         to: toEmail,
         subject: `Your EcoTrack Verification Code: ${otp}`,
@@ -93,7 +113,13 @@ export async function sendOtpEmail(toEmail: string, otp: string): Promise<SendOt
         html: htmlContent,
       });
 
-      console.log(`✅ Reset OTP email dispatched to ${toEmail} (MessageId: ${info.messageId})`);
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("SMTP connection/delivery timed out after 8 seconds")), 8000)
+      );
+
+      const info = (await Promise.race([sendPromise, timeoutPromise])) as any;
+
+      console.log(`✅ Reset OTP email dispatched to ${toEmail} (MessageId: ${info?.messageId || "sent"})`);
       return { success: true };
     } catch (err) {
       console.error("⚠️ Failed to dispatch email via SMTP, falling back to local terminal code:", err);

@@ -55,7 +55,7 @@ export default function ForgotPasswordPage() {
     setError(null);
     setLoading(true);
     try {
-      const res = await apiClient.post("/auth/forgot-password", { email });
+      const res = await apiClient.post("/auth/forgot-password", { email }, { timeout: 12000 });
       toastSuccess(res.data?.message || "Verification code sent to your email!");
       setStep(2);
       setCountdown(60);
@@ -132,7 +132,7 @@ export default function ForgotPasswordPage() {
     setError(null);
     setLoading(true);
     try {
-      await apiClient.post("/auth/forgot-password", { email });
+      await apiClient.post("/auth/forgot-password", { email }, { timeout: 12000 });
       setCountdown(60);
       setOtpDigits(["", "", "", "", "", ""]);
       toastSuccess("New verification code sent! Check your email / console.");
