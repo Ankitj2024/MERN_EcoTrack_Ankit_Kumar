@@ -19,7 +19,7 @@ const signToken = (payload: { id: string; role: string; companyId: string }) => 
 };
 
 // Google OAuth client
-const googleClientId = process.env.GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID;
+const googleClientId = (process.env.GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID || "").trim();
 const googleClient = googleClientId ? new OAuth2Client(googleClientId) : null;
 
 // Registers a brand new company along with its first user (always "admin").

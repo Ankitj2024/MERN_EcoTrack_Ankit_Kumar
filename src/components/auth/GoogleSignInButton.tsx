@@ -23,7 +23,7 @@ export const GoogleSignInButton: React.FC<Props> = ({ text = "Continue with Goog
   const [demoEmail, setDemoEmail] = useState("google.demo@ecotrack.com");
   const [demoName, setDemoName] = useState("Google EcoTrack User");
 
-  const googleClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID || "";
+  const googleClientId = (import.meta.env.VITE_GOOGLE_CLIENT_ID || "").trim();
 
   const handleCredentialResponse = async (response: any) => {
     if (!response?.credential) {
